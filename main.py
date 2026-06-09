@@ -9,7 +9,7 @@ from stanley_controller import StanleyController
 from mpc_controller import MPCController
 from ackermann_model import AckermannSlipModel
 from simulator import Simulator
-
+from GA_opt import GeneticAlgorithmNSGA2
 # Funções de Plotagem (incluindo as customizadas)
 from plot_data import (SimulationPlotter, plot_trajectories_custom, plot_rpms_custom, plot_motor_commands_custom,
                        plot_mpc_du_custom, plot_steering_and_delta_steering_custom, plot_constraints_in_action,
@@ -54,8 +54,8 @@ def run_simulation(control_method,
                                 ref_v=v_car_ref_sim,
                                 dt=0.1, horizon=10, control_horizon_m=5,
                                 use_differential=use_mpc_slip_constraints,
-                                q_diag = [2.0, 2.0, 1.0, 0.5, 1.0],
-                                r_diag = [2.0, 2.0, 20.0],
+                                q_diag = [3.73, 3.73, 597.11, 103.14, 4043.00],
+                                r_diag = [104.41, 104.41, 1.77],
                                 v_max=v_limit,
                                 delta_max_deg=angle_limit_deg)
     else:
@@ -82,17 +82,18 @@ def run_simulation(control_method,
 if __name__ == "__main__":
     # ==============================================================================
     # SELECIONE A ANÁLISE QUE DESEJA EXECUTAR
-    # Opções: "COMPARACAO_MPC", "ANALISE_VELOCIDADE", "COMPARACAO_CONTROLADORES"
-    ANALISE_A_FAZER = "COMPARACAO_CONTROLADORES"
+    # Opções: "COMPARACAO_MPC", "ANALISE_VELOCIDADE", "COMPARACAO_CONTROLADORES", "OTIMIZACAO_NSGA2"
+    ANALISE_A_FAZER = "OTIMIZACAO_NSGA2"
     # ==============================================================================
 
     # --- Geração do Caminho de Referência (comum a todas as análises) ---
     path_gen = PathGenerator(start_pos=(0, 0), start_theta=0)
-    path_gen.add_straight(length=5)
-    path_gen.add_curve(radius=3, angle_deg=60)
-    path_gen.add_straight(length=10)
-    path_gen.add_curve(radius=3, angle_deg=-60)
-    path_gen.add_straight(length=10)
+    path_gen.add_straight(length=3)
+    path_gen.add_curve(radius=4, angle_deg=60)   # Curva Suave (Esquerda)
+    path_gen.add_straight(length=2)
+    path_gen.add_curve(radius=1.5, angle_deg=-90) # Curva Fechada (Direita - Início da Chicane)
+    path_gen.add_curve(radius=1.5, angle_deg=90)  # Curva Fechada (Esquerda - Fim da Chicane)
+    path_gen.add_straight(length=4)
     path_x, path_y, path_theta = path_gen.get_path()
 
     # ==============================================================================
@@ -363,7 +364,7 @@ if __name__ == "__main__":
         plotter_filtered.plot_vehicle_speeds(target_linear_speed=v_ref)
         
         # ======================================================================
-        # NOVO BLOCO: Visualização 3D com PyBullet e Geração de Vídeo
+        # Visualização 3D com PyBullet e Geração de Vídeo
         # ======================================================================
         print("\n--- INICIANDO VISUALIZAÇÃO 3D E GERAÇÃO DE VÍDEO ---")
 
@@ -396,7 +397,117 @@ if __name__ == "__main__":
         print(f"Renderizando visualização 3D e gravando vídeo para: {video_output_path}")
         visualizer.render(sleep_time=0.01, record_video=False, video_path=video_output_path, follow_car_index=1) # Exemplo: seguir o segundo carro
         # ======================================================================
+    
+    # =========================================================================
+    # Opção 4: OTIMIZAÇÃO (TREINO + VALIDAÇÃO)
+    # =========================================================================
+    elif ANALISE_A_FAZER == "OTIMIZACAO_NSGA2":
+        print("\n" + "="*60)
+        print(" INICIANDO TREINAMENTO OFFLINE DO MPC COM NSGA-II")
+        print("="*60)
+        
+        # 1. Instancia o algoritmo genético (Ajuste pop_size e generations para testes)
+        # Dica: Use pop_size=10 e generations=5 primeiro só para ver se não dá erro
+        ga = GeneticAlgorithmNSGA2(path_x, path_y, path_theta, pop_size=20, generations=10)
+        
+        # 2. O processamento pesado acontece aqui. O algoritmo vai treinar.
+        solucoes_pareto, objetivos_pareto = ga.solve()
+        
+        print("\nTreinamento Finalizado! Gerando gráfico da Fronteira de Pareto...")
 
+        # =====================================================================
+        # ADICIONADO: PLOTAR A FRONTEIRA DE PARETO ANTES DA VALIDAÇÃO
+        # =====================================================================
+        import matplotlib.pyplot as plt
+
+        # Extrair os dados da lista de objetivos
+        # Lembrando que a velocidade retorna negativa do GA, então multiplicamos por -1
+        erros_grafico = [obj[0] for obj in objetivos_pareto]
+        esforcos_grafico = [obj[1] for obj in objetivos_pareto]
+        velocidades_grafico = [-obj[2] for obj in objetivos_pareto] 
+
+        # Encontrar qual foi a solução com o menor erro para destacá-la
+        indice_mais_preciso = np.argmin(erros_grafico)
+
+        plt.figure(figsize=(10, 6))
+        
+        # Cria o gráfico de bolinhas (Scatter Plot)
+        scatter = plt.scatter(erros_grafico, esforcos_grafico, c=velocidades_grafico, cmap='viridis', 
+                              s=150, alpha=0.8, edgecolors='black')
+        
+        # Adiciona a barra de cores lateral para a Velocidade
+        cbar = plt.colorbar(scatter)
+        cbar.set_label('Velocidade Máxima Atingida (m/s)', fontsize=12)
+        
+        # Destaca com uma estrela vermelha a solução de menor erro que o código vai rodar na validação
+        plt.scatter(erros_grafico[indice_mais_preciso], erros_grafico[indice_mais_preciso], 
+                    color='red', marker='*', s=300, 
+                    label="Solução Escolhida (Maior Precisão)")
+
+        # Formatação acadêmica do gráfico de Pareto
+        plt.title('Fronteira de Pareto - NSGA-II (Otimização do MPC)', fontsize=14, fontweight='bold')
+        plt.xlabel('Custo 1: Erro Acumulado (Posição + Orientação)', fontsize=12)
+        plt.ylabel('Custo 2: Esforço de Controle (Ação nos Motores)', fontsize=12)
+        plt.legend()
+        plt.grid(True, linestyle='--', alpha=0.6)
+        plt.tight_layout()
+        
+        # Pausa o código e exibe o gráfico (ao fechar a janela, a simulação final de validação começa)
+        plt.show()
+        # =====================================================================
+        
+        # 3. Como é multi-objetivo, temos várias opções ótimas. Vamos escolher 
+        #    a solução que tem o menor erro de rastreamento (priorizando precisão).
+        #    objetivos_pareto é uma lista de listas: [Erro, Esforço, -Velocidade]
+        genes_escolhidos = solucoes_pareto[indice_mais_preciso]
+        
+        # Extração dos 7 parâmetros sintonizados (reais através de base 10)
+        q_pos_opt = 10 ** genes_escolhidos[0]
+        q_theta_opt = 10 ** genes_escolhidos[1]
+        q_delta_opt = 10 ** genes_escolhidos[2]
+        q_v_opt = 10 ** genes_escolhidos[3]
+        
+        r_motores_opt = 10 ** genes_escolhidos[4]
+        r_esterco_opt = 10 ** genes_escolhidos[5]
+        
+        v_ref_opt = genes_escolhidos[6]
+        
+        print("\n--- MATRIZES SINTONIZADAS COMPLETAS ---")
+        # Mostramos q_pos_opt duas vezes para x e y de forma simétrica
+        print(f"Matriz Q_diag = [{q_pos_opt:.2f}, {q_pos_opt:.2f}, {q_theta_opt:.2f}, {q_delta_opt:.2f}, {q_v_opt:.2f}]")
+        print(f"Matriz R_diag = [{r_motores_opt:.2f}, {r_motores_opt:.2f}, {r_esterco_opt:.2f}]")
+        print(f"Velocidade Ideal: {v_ref_opt:.2f} m/s")
+        print(f"Métricas Previstas -> Erro: {objetivos_pareto[indice_mais_preciso][0]:.4f}, Esforço: {objetivos_pareto[indice_mais_preciso][1]:.2f}")
+        
+        # =====================================================================
+        # VALIDAÇÃO ONLINE COM REDUÇÃO DE PARÂMETROS (7 GENES)
+        # =====================================================================
+        print("\nA executar Simulação Real Final com os parâmetros encontrados...")
+        
+        model = AckermannSlipModel(use_mechanical_differential=False, slip_gain=1.0)
+        
+        # Alimentar o MPCController com q_pos duplo e r_motores duplo
+        controller = MPCController(
+            model=model, path_x=path_x, path_y=path_y, path_theta=path_theta,
+            ref_v=v_ref_opt, dt=0.1, horizon=10, control_horizon_m=5,
+            use_differential=True, 
+            q_diag=[q_pos_opt, q_pos_opt, q_theta_opt, q_delta_opt, q_v_opt], 
+            r_diag=[r_motores_opt, r_motores_opt, r_esterco_opt],
+            v_max=3.5, delta_max_deg=30
+        )
+        
+        sim = Simulator(
+            model=model, controller=controller, path_x=path_x, path_y=path_y,
+            end_of_path_threshold=0.3, use_velocity_controller=False,
+            T=40, dt=0.001
+        )
+        sim.run()
+        
+        # 5. Chama o plotador para exibir o resultado da validação
+        print("Gerando gráficos...")
+        plotter = SimulationPlotter(log_data_list=[sim.system_log], labels=["MPC + NSGA-II"])
+        plot_trajectories_custom(plotter, path_x, path_y)
+        plot_vehicle_speeds_custom(plotter, target_linear_speed=v_ref_opt)
     else:
         print(f"ERRO: Análise '{ANALISE_A_FAZER}' desconhecida. Verifique a variável no início do script.")
 

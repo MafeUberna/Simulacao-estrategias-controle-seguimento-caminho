@@ -81,7 +81,7 @@ class PurePursuitController(BaseController):
             heading_vector = np.array([np.cos(self.current_theta), np.sin(self.current_theta)])
             path_vector = np.array([dx, dy])
             if dist >= self.Ld and np.dot(heading_vector, path_vector) > 0:
-                return self.path_x[i], self.path_y[i]
+                return self._path_x[i], self._path_y[i]
 
         # If still no point found (e.g. path is very short, or car is past the path)
         # return the last point of the path

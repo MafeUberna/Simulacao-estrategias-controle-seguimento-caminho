@@ -115,15 +115,15 @@ class Simulator:
         self.last_vehicle_dynamics_time = 0
 
     def run(self):
-        for i in range(self.steps):
-            
+        i = 0
+        while self.time <= self.T:
             if self.path_x is not None and self.path_y is not None:
-                dist_to_end = np.sqrt((self.x - self.path_x[-1])**2 + (self.y - self.path_y[-1])**2)
-                if dist_to_end < self.end_of_path_threshold:
+                dist_para_o_fim = np.hypot(self.x - self.path_x[-1], self.y - self.path_y[-1])
+                if dist_para_o_fim < self.end_of_path_threshold:
                     print(
-                        f"\n[Simulator] Fim do caminho atingido na etapa {i} (tempo: {self.time:.2f}s). Distância final: {dist_to_end:.3f}m. Parando a simulação."
+                        f"\n[Simulator] Fim do caminho atingido na etapa {i} (tempo: {self.time:.2f}s). Distância final: {dist_para_o_fim:.3f}m. Parando a simulação."
                     )
-                    break  # Sai do loop principal
+                    break
 
             if self.time - self.last_path_control_time >= self.dt_path_controller:
                 self._path_control()
@@ -146,6 +146,7 @@ class Simulator:
                 self.last_vehicle_dynamics_time = self.time
 
             self.time += self.dt
+            i += 1
         else:
             print(f"\n[Simulator] Tempo máximo de simulação ({self.T}s) atingido. A simulação terminou por tempo.")
 
