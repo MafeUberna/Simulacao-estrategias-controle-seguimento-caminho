@@ -6,7 +6,7 @@ from mpc_controller import MPCController
 from simulator import Simulator
 
 class GeneticAlgorithmNSGA2:
-    def __init__(self, path_x, path_y, path_theta, pop_size=30, generations=20):
+    def __init__(self, path_x, path_y, path_theta, pop_size=40, generations=24):
         self.path_x = path_x
         self.path_y = path_y
         self.path_theta = path_theta
@@ -20,8 +20,8 @@ class GeneticAlgorithmNSGA2:
             (-2, 2.5), # [1] q_theta 
             (-2, 2.5), # [2] q_delta
             (-2, 2.5), # [3] q_v
-            (-2, 3.5), # [4] r_motores (R geralmente pode ser maior, deixamos até ~3000)
-            (-2, 3.5), # [5] r_esterco
+            (-1, 1), # [4] r_motores (R geralmente pode ser maior, deixamos até ~3000)
+            (-1, 1), # [5] r_esterco
             (0.5, 3.5) # [6] v_ref (velocidade máxima)
         ]
         self.taxa_cruzamento = 0.8

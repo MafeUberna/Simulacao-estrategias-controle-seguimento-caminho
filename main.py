@@ -82,7 +82,7 @@ def run_simulation(control_method,
 if __name__ == "__main__":
     # ==============================================================================
     # SELECIONE A ANÁLISE QUE DESEJA EXECUTAR
-    # Opções: "COMPARACAO_MPC", "ANALISE_VELOCIDADE", "COMPARACAO_CONTROLADORES", "OTIMIZACAO_NSGA2"
+    # Opções: "COMPARACAO_MPC", "ANALISE_VELOCIDADE", "COMPARACAO_CONTROLADORES", "OTIMIZACAO_NSGA2", "VALIDACAO_GA"
     ANALISE_A_FAZER = "OTIMIZACAO_NSGA2"
     # ==============================================================================
 
@@ -408,60 +408,19 @@ if __name__ == "__main__":
         
         # 1. Instancia o algoritmo genético (Ajuste pop_size e generations para testes)
         # Dica: Use pop_size=10 e generations=5 primeiro só para ver se não dá erro
-        ga = GeneticAlgorithmNSGA2(path_x, path_y, path_theta, pop_size=20, generations=10)
+        ga = GeneticAlgorithmNSGA2(path_x, path_y, path_theta, pop_size=40, generations=24)
         
         # 2. O processamento pesado acontece aqui. O algoritmo vai treinar.
         solucoes_pareto, objetivos_pareto = ga.solve()
         
-        print("\nTreinamento Finalizado! Gerando gráfico da Fronteira de Pareto...")
-
-        # =====================================================================
-        # ADICIONADO: PLOTAR A FRONTEIRA DE PARETO ANTES DA VALIDAÇÃO
-        # =====================================================================
-        import matplotlib.pyplot as plt
-
-        # Extrair os dados da lista de objetivos
-        # Lembrando que a velocidade retorna negativa do GA, então multiplicamos por -1
-        erros_grafico = [obj[0] for obj in objetivos_pareto]
-        esforcos_grafico = [obj[1] for obj in objetivos_pareto]
-        velocidades_grafico = [-obj[2] for obj in objetivos_pareto] 
-
-        # Encontrar qual foi a solução com o menor erro para destacá-la
-        indice_mais_preciso = np.argmin(erros_grafico)
-
-        plt.figure(figsize=(10, 6))
-        
-        # Cria o gráfico de bolinhas (Scatter Plot)
-        scatter = plt.scatter(erros_grafico, esforcos_grafico, c=velocidades_grafico, cmap='viridis', 
-                              s=150, alpha=0.8, edgecolors='black')
-        
-        # Adiciona a barra de cores lateral para a Velocidade
-        cbar = plt.colorbar(scatter)
-        cbar.set_label('Velocidade Máxima Atingida (m/s)', fontsize=12)
-        
-        # Destaca com uma estrela vermelha a solução de menor erro que o código vai rodar na validação
-        plt.scatter(erros_grafico[indice_mais_preciso], erros_grafico[indice_mais_preciso], 
-                    color='red', marker='*', s=300, 
-                    label="Solução Escolhida (Maior Precisão)")
-
-        # Formatação acadêmica do gráfico de Pareto
-        plt.title('Fronteira de Pareto - NSGA-II (Otimização do MPC)', fontsize=14, fontweight='bold')
-        plt.xlabel('Custo 1: Erro Acumulado (Posição + Orientação)', fontsize=12)
-        plt.ylabel('Custo 2: Esforço de Controle (Ação nos Motores)', fontsize=12)
-        plt.legend()
-        plt.grid(True, linestyle='--', alpha=0.6)
-        plt.tight_layout()
-        
-        # Pausa o código e exibe o gráfico (ao fechar a janela, a simulação final de validação começa)
-        plt.show()
-        # =====================================================================
+        print("\nTreinamento Finalizado! Fronteira de Pareto encontrada.")
         
         # 3. Como é multi-objetivo, temos várias opções ótimas. Vamos escolher 
         #    a solução que tem o menor erro de rastreamento (priorizando precisão).
         #    objetivos_pareto é uma lista de listas: [Erro, Esforço, -Velocidade]
+        indice_mais_preciso = np.argmin([obj[0] for obj in objetivos_pareto])
         genes_escolhidos = solucoes_pareto[indice_mais_preciso]
         
-        # Extração dos 7 parâmetros sintonizados (reais através de base 10)
         q_pos_opt = 10 ** genes_escolhidos[0]
         q_theta_opt = 10 ** genes_escolhidos[1]
         q_delta_opt = 10 ** genes_escolhidos[2]
@@ -473,14 +432,14 @@ if __name__ == "__main__":
         v_ref_opt = genes_escolhidos[6]
         
         print("\n--- MATRIZES SINTONIZADAS COMPLETAS ---")
-        # Mostramos q_pos_opt duas vezes para x e y de forma simétrica
+        # Mostramos q_pos_opt duas vezes para x e y
         print(f"Matriz Q_diag = [{q_pos_opt:.2f}, {q_pos_opt:.2f}, {q_theta_opt:.2f}, {q_delta_opt:.2f}, {q_v_opt:.2f}]")
         print(f"Matriz R_diag = [{r_motores_opt:.2f}, {r_motores_opt:.2f}, {r_esterco_opt:.2f}]")
         print(f"Velocidade Ideal: {v_ref_opt:.2f} m/s")
         print(f"Métricas Previstas -> Erro: {objetivos_pareto[indice_mais_preciso][0]:.4f}, Esforço: {objetivos_pareto[indice_mais_preciso][1]:.2f}")
         
         # =====================================================================
-        # VALIDAÇÃO ONLINE COM REDUÇÃO DE PARÂMETROS (7 GENES)
+        # VALIDAÇÃO ONLINE COM REDUÇÃO DE PARÂMETROS
         # =====================================================================
         print("\nA executar Simulação Real Final com os parâmetros encontrados...")
         
@@ -508,6 +467,134 @@ if __name__ == "__main__":
         plotter = SimulationPlotter(log_data_list=[sim.system_log], labels=["MPC + NSGA-II"])
         plot_trajectories_custom(plotter, path_x, path_y)
         plot_vehicle_speeds_custom(plotter, target_linear_speed=v_ref_opt)
+    # =========================================================================
+    # Opção 5: OTIMIZAÇÃO (TREINO + VALIDAÇÃO)
+    # =========================================================================
+
+    elif ANALISE_A_FAZER == "VALIDACAO_GA":
+        print("\n" + "="*80)
+        print(" INICIANDO ANÁLISE DE ROBUSTEZ E DESEMPENHO REAL DA IA")
+        print("="*80)
+
+        # 1. Definição dos parâmetros ótimos obtidos pela IA (Insira aqui o resultado real do seu GA)
+        # Exemplo de vetor sintonizado [q_pos, q_theta, q_delta, q_v, r_motores, r_esterco] + v_ref
+        Q_ia = [0.20, 0.20, 21.70, 2.89, 274.03]
+        R_ia = [2.20, 2.20, 0.07]
+        v_ia = 0.73 # Velocidade ótima encontrada pela IA
+
+        # 2. Gerando os 3 tipos de pistas com características distintas
+        print("Gerando cenários de teste para validação...")
+        
+        pista_A = PathGenerator(start_pos=(0, 0), start_theta=0)
+        pista_A.add_straight(length=2.0)
+        pista_A.add_curve(radius=1.5, angle_deg=90)   # Curva para a esquerda
+        pista_A.add_straight(length=3.0)
+        pista_A.add_curve(radius=1.5, angle_deg=90)   # Topo esquerdo
+        pista_A.add_straight(length=1.5)
+        pista_A.add_curve(radius=1.0, angle_deg=-90)  # Entrada do miolo (direita)
+        pista_A.add_curve(radius=1.0, angle_deg=90)   # Curva em S para esquerda
+        pista_A.add_straight(length=2.0)
+        pista_A.add_curve(radius=1.5, angle_deg=90)   # Curva longa de retorno
+        pista_A.add_straight(length=4.0)
+        ax_ref, ay_ref, ath_ref = pista_A.get_path()
+        
+        pista_B = PathGenerator(start_pos=(0, 0), start_theta=0)
+        pista_B.add_straight(length=3.0)
+        pista_B.add_curve(radius=2.0, angle_deg=-45)  # Desvio inicial para a direita
+        pista_B.add_curve(radius=2.0, angle_deg=90)   # Transição forte para a esquerda
+        pista_B.add_curve(radius=2.0, angle_deg=-45)  # Alinhamento de volta para a reta
+        pista_B.add_straight(length=4.0)
+        bx_ref, by_ref, bth_ref = pista_B.get_path()
+
+        pista_C = PathGenerator(start_pos=(0, 0), start_theta=0)
+        pista_C.add_straight(length=4.0)
+        pista_C.add_curve(radius=0.8, angle_deg=90)   # Primeira quina fechada
+        pista_C.add_straight(length=2.0)
+        pista_C.add_curve(radius=0.8, angle_deg=90)
+        pista_C.add_straight(length=3.0)
+        pista_C.add_curve(radius=1.0, angle_deg=-90)  # Inversão em gancho
+        pista_C.add_straight(length=2.0)
+        pista_C.add_curve(radius=0.8, angle_deg=90)
+        pista_C.add_straight(length=4.0)
+        cx_ref, cy_ref, cth_ref = pista_C.get_path()
+
+        cenarios = [
+            {"nome": "Pista A (Rodovia - Curvas Longas)", "x": ax_ref, "y": ay_ref, "th": ath_ref},
+            {"nome": "Pista B (Urbana - Chicanes e 90°)", "x": bx_ref, "y": by_ref, "th": bth_ref},
+            {"nome": "Pista C (Industrial - Retorno 180°)", "x": cx_ref, "y": cy_ref, "th": cth_ref}
+        ]
+
+        tabela_desempenho = []
+
+        # 3. Execução das Simulações Cruzadas e Geração de Gráficos
+        for cenario in cenarios:
+            print(f"\n>>> Simulando veículo na {cenario['nome']}")
+            
+            model = AckermannSlipModel(use_mechanical_differential=False, slip_gain=1)
+            controller = MPCController(
+                model=model, path_x=cenario['x'], path_y=cenario['y'], path_theta=cenario['th'],
+                ref_v=v_ia, dt=0.1, horizon=10, control_horizon_m=5, use_differential=True,
+                q_diag=Q_ia, r_diag=R_ia, v_max=3.5, delta_max_deg=30
+            )
+            sim = Simulator(
+                model=model, controller=controller, path_x=cenario['x'], path_y=cenario['y'],
+                end_of_path_threshold=0.3, use_velocity_controller=False, T=50, dt=0.001
+            )
+            sim.run()
+            
+            # Coleta de dados e cálculos de desempenho
+            log_dados = sim.system_log
+            error_data = Simulator.calculate_tracking_errors(log_dados, cenario['x'], cenario['y'], cenario['th'])
+            rms_xy, rms_theta = Simulator.calculate_rms_error(error_data)
+            
+            df_motor = pd.DataFrame(log_dados.get("motor_cmd", []), columns=['time', 'left', 'right'])
+            esforco_total = np.sum(np.abs(np.diff(df_motor['left']))) + np.sum(np.abs(np.diff(df_motor['right']))) if not df_motor.empty else 999.0
+
+            # Índice Combinado (60% Erro Linear, 20% Erro Angular, 20% Esforço Escalado)
+            nota_performance = (0.6 * rms_xy) + (0.2 * np.deg2rad(rms_theta)) + (0.2 * (esforco_total / 1000.0))
+
+            tabela_desempenho.append({
+                "pista": cenario['nome'], "vel": v_ia, "rms_xy": rms_xy, "rms_th": rms_theta, "esforco": esforco_total, "nota": nota_performance
+            })
+
+            # Instancia o SimulationPlotter original do seu projeto
+            plotter = SimulationPlotter(log_data_list=[log_dados], labels=[f"MPC Otimizado (IA)"])
+            
+            # --- IMAGEM 1: GRÁFICO DA TRAJETÓRIA REAL (Padrão COMPARACAO_MPC) ---
+            print(f"Exibindo Gráfico de Trajetória - {cenario['nome']}...")
+            plot_trajectories_custom(plotter, cenario['x'], cenario['y'], title_suffix=f"- {cenario['nome']}", heading_step=100)
+
+            # --- IMAGEM 2: GRÁFICO DO ESFORÇO DE CONTROLE (Comandos do Motor) ---
+            print(f"Exibindo Gráfico de Esforço de Controle - {cenario['nome']}...")
+            import matplotlib.pyplot as plt
+            if not df_motor.empty:
+                plt.figure(figsize=(12, 6))
+                plt.plot(df_motor['time'], df_motor['left'], 'b-', label='Motor Esquerdo (Cmd)', alpha=0.8)
+                plt.plot(df_motor['time'], df_motor['right'], 'g--', label='Motor Direito (Cmd)', alpha=0.8)
+                
+                plt.title(f'Sinal de Comando dos Motores (Esforço de Controle) - {cenario['nome']}', fontsize=12, fontweight='bold')
+                plt.xlabel('Tempo (s)', fontsize=10)
+                plt.ylabel('Ação de Controle / Tensão Comando', fontsize=10)
+                plt.grid(True, linestyle='--', alpha=0.6)
+                plt.legend(loc='upper right')
+                plt.tight_layout()
+                plt.show() # O código avança para o próximo cenário após você fechar esta janela
+            else:
+                print("Aviso: Histórico de comandos de motor vazio para esta simulação.")
+
+        # --- IMPRESSÃO FORMATADA DA TABELA FINAL DE RESULTADOS ---
+        print("\n" + "="*105)
+        print(" " * 25 + "RELATÓRIO DE DESEMPENHO REAL DO CONTROLADOR OTIMIZADO (IA)")
+        print("="*105)
+        header = f"{'Cenário de Pista Testado':<38} | {'Vel (m/s)':<10} | {'RMS Pos (m)':<12} | {'RMS Ang (°)':<12} | {'Esforço Atu':<12} | {'IND. PERF (Nota)'}"
+        print(header)
+        print("-"*105)
+        for r in tabela_desempenho:
+            row = f"{r['pista']:<38} | {r['vel']:<10.2f} | {r['rms_xy']:<12.4f} | {r['rms_th']:<12.4f} | {r['esforco']:<12.1f} | {r['nota']:.4f}"
+            print(row)
+        print("-"*105)
+        print("= NOTA METODOLÓGICA: No índice combinado, valores menores comprovam melhor eficiência global.")
+        print("="*105)
     else:
         print(f"ERRO: Análise '{ANALISE_A_FAZER}' desconhecida. Verifique a variável no início do script.")
 
