@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import os
 
 # Controladores e Modelos
 from path_generator import PathGenerator
@@ -83,8 +84,8 @@ if __name__ == "__main__":
     # ==============================================================================
     # SELECIONE A ANÁLISE QUE DESEJA EXECUTAR
     # Opções: "COMPARACAO_MPC", "ANALISE_VELOCIDADE", "COMPARACAO_CONTROLADORES", "OTIMIZACAO_NSGA2", "VALIDACAO_GA"
-    ANALISE_A_FAZER = "OTIMIZACAO_NSGA2"
     # ==============================================================================
+    ANALISE_A_FAZER = "OTIMIZACAO_NSGA2"
 
     # --- Geração do Caminho de Referência (comum a todas as análises) ---
     path_gen = PathGenerator(start_pos=(0, 0), start_theta=0)
@@ -105,7 +106,6 @@ if __name__ == "__main__":
         velocity_analysis_results = []
         rms_results = [] # Lista para armazenar os resultados do RMS para a tabela
 
-        # Define uma configuração base de controlador para o teste
         config = {
             'control_method': 'mpc',
             'use_mechanical_differential': False,
@@ -118,33 +118,18 @@ if __name__ == "__main__":
                 control_method=config['control_method'],
                 use_mechanical_differential=config['use_mechanical_differential'],
                 use_mpc_slip_constraints=config['use_mpc_slip_constraints'],
-                path_x=path_x,
-                path_y=path_y,
-                path_theta=path_theta,
-                v_car_ref_sim=v,
-                T_sim=116,
-                end_path_threshold=0.1
+                path_x=path_x, path_y=path_y, path_theta=path_theta,
+                v_car_ref_sim=v, T_sim=116, end_path_threshold=0.1
             )
-
-            print("Calculando erros de trajetória...")
             error_data = Simulator.calculate_tracking_errors(log, path_x, path_y, path_theta)
-            
-            # --- Cálculo e armazenamento do erro RMS ---
             rms_xy, rms_theta = Simulator.calculate_rms_error(error_data)
             rms_results.append({
-                'velocity': v,
-                'rms_xy_m': rms_xy,
-                'rms_theta_deg': rms_theta
+                'velocity': v, 'rms_xy_m': rms_xy, 'rms_theta_deg': rms_theta
             })
-            # -----------------------------------------------
-
             velocity_analysis_results.append({
-                'velocity': v,
-                'log': pd.DataFrame(log.get('vehicle_pose', []), columns=['time', 'x', 'y', 'theta', 'beta']),
-                'error_data': error_data
+                'velocity': v, 'log': pd.DataFrame(log.get('vehicle_pose', []), columns=['time', 'x', 'y', 'theta', 'beta']), 'error_data': error_data
             })
 
-        # --- Impressão da tabela de resultados ---
         print("\n" + "="*50)
         print(" " * 10 + "Tabela de Resultados - Erro RMS")
         print("="*50)
@@ -153,9 +138,6 @@ if __name__ == "__main__":
         for result in rms_results:
             print(f"{result['velocity']:<20.2f} | {result['rms_xy_m']:<20.4f} | {result['rms_theta_deg']:<20.4f}")
         print("="*50)
-        # -----------------------------------------------
-
-        print("\nSimulações concluídas. Gerando gráfico de análise detalhada de erro...")
         plot_error_analysis_detailed(velocity_analysis_results, path_x, path_y)
     
     # ==============================================================================
@@ -172,115 +154,60 @@ if __name__ == "__main__":
         all_logs = []
         labels = []
         for exp in experiments:
-            print(f"\n--- Executando Experimento: {exp['label']} ---")
             log = run_simulation(
-                control_method=exp['control_method'],
-                use_mechanical_differential=exp['use_mechanical_differential'],
-                use_mpc_slip_constraints=exp['use_mpc_slip_constraints'],
-                path_x=path_x, path_y=path_y, path_theta=path_theta,
-                v_car_ref_sim=0.75 , T_sim=48
+                control_method=exp['control_method'], use_mechanical_differential=exp['use_mechanical_differential'],
+                use_mpc_slip_constraints=exp['use_mpc_slip_constraints'], path_x=path_x, path_y=path_y, path_theta=path_theta,
+                v_car_ref_sim=0.75, T_sim=48
             )
             all_logs.append(log)
             labels.append(exp['label'])
 
-        print("\nSimulações concluídas. Gerando gráficos comparativos...")
         plotter = SimulationPlotter(log_data_list=all_logs, labels=labels)
+        plot_trajectories_custom(plotter, path_x, path_y, heading_step=100)
+        plot_rpms_custom(plotter, experiments)
+        plot_motor_commands_custom(plotter, experiments)
+        plot_vehicle_speeds_custom(plotter)
+        plot_mpc_du_custom(plotter)
+        plot_steering_and_delta_steering_custom(plotter)
 
-        is_mpc_in_experiments = any(exp['control_method'] == 'mpc' for exp in experiments)
-        if is_mpc_in_experiments:
-            plot_trajectories_custom(plotter, path_x, path_y, heading_step=100)
-            plot_rpms_custom(plotter, experiments)
-            plot_motor_commands_custom(plotter, experiments)
-            plot_vehicle_speeds_custom(plotter)
-            plot_mpc_du_custom(plotter)
-            plot_steering_and_delta_steering_custom(plotter)
-            # --- Bloco para o Gráfico Comparativo da Figura 7 ---
-            print("\n--- Gerando Gráfico Comparativo de Restrições (Figura 7) ---")
+        v_limit_baixo = 0.6
+        angle_limit_baixo = 6
+        label_base = 'MPC (Sem Dif Mec, CR)'
+        try:
+            indice_log_real = labels.index(label_base)
+            log_limite_real = all_logs[indice_log_real]
+            log_limite_baixo = run_simulation(
+                control_method='mpc', use_mechanical_differential=False, use_mpc_slip_constraints=True,
+                path_x=path_x, path_y=path_y, path_theta=path_theta, v_car_ref_sim=1.0, T_sim=50,
+                v_limit=v_limit_baixo, angle_limit_deg=angle_limit_baixo
+            )
+            plot_comparative_constraints(
+                log_real=log_limite_real, label_real=f'{label_base} (Limite Real)', log_baixo=log_limite_baixo,
+                label_baixo=f'{label_base} (Limite Baixo)', v_limit_real=2, v_limit_baixo=v_limit_baixo,
+                angle_limit_real=30, angle_limit_baixo=angle_limit_baixo
+            )
+        except ValueError:
+            print("Aviso: Experimento base não encontrado para restrições.")
 
-            # 1. Definir os limites baixos para o teste
-            v_limit_baixo = 0.6
-            angle_limit_baixo = 6
-
-            # 2. Encontrar o log da simulação com os limites reais que já rodamos
-            # Vamos usar o 'MPC (Sem Dif Mec, CR)' como base para a comparação
-            label_base = 'MPC (Sem Dif Mec, CR)'
-            try:
-                indice_log_real = labels.index(label_base)
-                log_limite_real = all_logs[indice_log_real]
-
-                # 3. Rodar uma NOVA simulação para o mesmo controlador, mas com os LIMITES BAIXOS
-                print(f"Executando simulação extra para '{label_base}' com limites baixos...")
-                log_limite_baixo = run_simulation(
-                    control_method='mpc',
-                    use_mechanical_differential=False,
-                    use_mpc_slip_constraints=True,
-                    path_x=path_x, path_y=path_y, path_theta=path_theta,
-                    v_car_ref_sim=1.0, T_sim=50,
-                    v_limit=v_limit_baixo,          # <-- Passa o limite baixo de velocidade
-                    angle_limit_deg=angle_limit_baixo  # <-- Passa o limite baixo de ângulo
-                )
-
-                # 4. Chamar a nova função de plotagem com os dois resultados
-                plot_comparative_constraints(
-                    log_real=log_limite_real,
-                    label_real=f'{label_base} (Limite Real)',
-                    log_baixo=log_limite_baixo,
-                    label_baixo=f'{label_base} (Limite Baixo)',
-                    v_limit_real=2,
-                    v_limit_baixo=v_limit_baixo,
-                    angle_limit_real=30,
-                    angle_limit_baixo=angle_limit_baixo
-                )
-            except ValueError as e:
-                print(f"AVISO: O experimento '{label_base}' não foi encontrado. Pulando o gráfico da Figura 7.")
-        # ======================================================================
-        # NOVO BLOCO: Visualização 3D com PyBullet e Geração de Vídeo para COMPARACAO_MPC
-        # ======================================================================
-        print("\n--- INICIANDO VISUALIZAÇÃO 3D E GERAÇÃO DE VÍDEO PARA COMPARACAO_MPC ---")
-
-        # 1. Instanciar o VisualizerSim
         visualizer = VisualizerSim(path_x=path_x, path_y=path_y)
-
-        # 2. Adicionar as trajetórias dos carros
-        # A lista 'all_logs' já contém os dados para os experimentos MPC
-        colors = [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1], [1, 1, 0, 1], [0, 1, 1, 1], [1, 0, 1, 1], [0.5, 0.5, 0.5, 1]]
-
+        colors = [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1], [1, 1, 0, 1], [0, 1, 1, 1]]
         for i, log in enumerate(all_logs):
             vehicle_poses = log.get("vehicle_pose", [])
             if vehicle_poses:
-                traj_x = [p[1] for p in vehicle_poses]
-                traj_y = [p[2] for p in vehicle_poses]
-                traj_theta = [p[3] for p in vehicle_poses]
-
-                car_color = colors[i % len(colors)]
-                visualizer.add_car_trajectory(traj_x, traj_y, traj_theta, color=car_color)
-                print(f"Adicionada trajetória para: {labels[i]} (Cor: {car_color[:3]})")
-
-        # 3. Renderizar a simulação e gravar o vídeo
-        video_output_path = "simulacao_comparativa_mpc.mp4"
-        print(f"Renderizando visualização 3D e gravando vídeo para: {video_output_path}")
-        # Ajuste sleep_time e follow_car_index conforme sua preferência
-        visualizer.render(sleep_time=0.01, record_video=False, video_path=video_output_path, follow_car_index=0) # Exemplo: seguir o primeiro carro
-        # ======================================================================
+                visualizer.add_car_trajectory([p[1] for p in vehicle_poses], [p[2] for p in vehicle_poses], [p[3] for p in vehicle_poses], color=colors[i % len(colors)])
+        visualizer.render(sleep_time=0.01, record_video=False, video_path="simulacao_comparativa_mpc.mp4", follow_car_index=0)
 
     # ==============================================================================
     # MODO 3: Comparação dos Controladores PP, Stanley e MPC
     # ==============================================================================
     elif ANALISE_A_FAZER == "COMPARACAO_CONTROLADORES":
-        print("--- INICIANDO COMPARAÇÃO GERAL DE CONTROLADORES E CENÁRIOS ---")
-
-        # 1° MUDANÇA: Adicionado 'MPC (Sem Dif, Sem Restr.)' à lista de experimentos
+        print("--- INICIANDO COMPARAÇÃO GERAL DE CONTROLADORES ---")
         experiments = [
-            # MPC
             {'label': 'MPC (Com Dif Mec)', 'control_method': 'mpc', 'use_mechanical_differential': True, 'use_mpc_slip_constraints': False},
             {'label': 'MPC (Sem Dif, C/ Restr. Slip)', 'control_method': 'mpc', 'use_mechanical_differential': False, 'use_mpc_slip_constraints': True},
             {'label': 'MPC (Sem Dif, Sem Restr.)', 'control_method': 'mpc', 'use_mechanical_differential': False, 'use_mpc_slip_constraints': False},
-
-            # Stanley
             {'label': 'Stanley (Com Dif Mec)', 'control_method': 'stanley', 'use_mechanical_differential': True, 'use_mpc_slip_constraints': False},
             {'label': 'Stanley (Sem Dif Mec)', 'control_method': 'stanley', 'use_mechanical_differential': False, 'use_mpc_slip_constraints': False},
-
-            # Pure Pursuit
             {'label': 'Pure Pursuit (Com Dif Mec)', 'control_method': 'pp', 'use_mechanical_differential': True, 'use_mpc_slip_constraints': False},
             {'label': 'Pure Pursuit (Sem Dif Mec)', 'control_method': 'pp', 'use_mechanical_differential': False, 'use_mpc_slip_constraints': False},
         ]
@@ -292,310 +219,137 @@ if __name__ == "__main__":
         T_sim = 60   
 
         for exp in experiments:
-            print(f"\n--- Executando Experimento: {exp['label']} ---")
             log = run_simulation(
-                control_method=exp['control_method'],
-                use_mechanical_differential=exp['use_mechanical_differential'],
-                use_mpc_slip_constraints=exp['use_mpc_slip_constraints'],
-                path_x=path_x, 
-                path_y=path_y, 
-                path_theta=path_theta,
-                v_car_ref_sim=v_ref,
-                T_sim=T_sim,
+                control_method=exp['control_method'], use_mechanical_differential=exp['use_mechanical_differential'],
+                use_mpc_slip_constraints=exp['use_mpc_slip_constraints'], path_x=path_x, path_y=path_y, path_theta=path_theta,
+                v_car_ref_sim=v_ref, T_sim=T_sim
             )
             all_logs.append(log)
             labels.append(exp['label'])
-
-            print("Calculando erros de trajetória...")
             error_data = Simulator.calculate_tracking_errors(log, path_x, path_y, path_theta)
             rms_xy, rms_theta = Simulator.calculate_rms_error(error_data)
-            rms_results.append({
-                'label': exp['label'],
-                'rms_xy_m': rms_xy,
-                'rms_theta_deg': rms_theta
-            })
+            rms_results.append({'label': exp['label'], 'rms_xy_m': rms_xy, 'rms_theta_deg': rms_theta})
 
         print("\n" + "="*80)
-        print(" " * 20 + "Tabela Comparativa - Erro RMS de Rastreamento")
-        print("="*80)
         print(f"{'Configuração':<35} | {'RMS Posição (m)':<20} | {'RMS Ângulo (graus)':<20}")
         print("-"*80)
-        rms_results.sort(key=lambda x: x['label'])
-        for result in rms_results:
+        for result in sorted(rms_results, key=lambda x: x['label']):
             print(f"{result['label']:<35} | {result['rms_xy_m']:<20.4f} | {result['rms_theta_deg']:<20.4f}")
         print("="*80)
 
-        print("\nSimulações concluídas. Gerando gráficos comparativos para o cenário selecionado...")
-        
-        # 2° MUDANÇA: Ordem dos gráficos alterada para Pure Pursuit -> Stanley -> MPC
-        labels_for_filtered_plot = [
-            'Pure Pursuit (Sem Dif Mec)',
-            'Stanley (Sem Dif Mec)',
-            'MPC (Sem Dif, C/ Restr. Slip)'
-        ]
-        
-        filtered_logs = []
-        filtered_labels = []
-        
-        for label_to_find in labels_for_filtered_plot:
-            try:
-                idx = labels.index(label_to_find)
-                filtered_logs.append(all_logs[idx])
-                filtered_labels.append(labels[idx])
-            except ValueError:
-                print(f"AVISO: O cenário '{label_to_find}' não foi encontrado e será ignorado nos gráficos.")
+        labels_for_filtered_plot = ['Pure Pursuit (Sem Dif Mec)', 'Stanley (Sem Dif Mec)', 'MPC (Sem Dif, C/ Restr. Slip)']
+        filtered_logs = [all_logs[labels.index(lbl)] for lbl in labels_for_filtered_plot if lbl in labels]
+        filtered_labels = [lbl for lbl in labels_for_filtered_plot if lbl in labels]
 
         plotter_filtered = SimulationPlotter(log_data_list=filtered_logs, labels=filtered_labels)
-
-        print("\nGerando Gráfico 1: Trajetórias")
         plot_trajectories_custom(plotter_filtered, path_x, path_y, heading_step=150)
-
-        # 3° MUDANÇA: Os gráficos de RPM e Comando de Velocidade usarão a nova lógica implementada em `plot_data.py`
-        print("Gerando Gráfico 2: Perfil de Velocidade das Rodas (RPM)")
         plotter_filtered.plot_rpms() 
-
-        print("Gerando Gráfico 3: Comando de Velocidade (Linear)")
         plotter_filtered.plot_velocity_commands()
-
-        print("Gerando Gráfico 4: Ângulo de Esterçamento")
         plotter_filtered.plot_steering_angles()
-
-        print("Gerando Gráfico 5: Perfil de Velocidade do Veículo")
         plotter_filtered.plot_vehicle_speeds(target_linear_speed=v_ref)
         
-        # ======================================================================
-        # Visualização 3D com PyBullet e Geração de Vídeo
-        # ======================================================================
-        print("\n--- INICIANDO VISUALIZAÇÃO 3D E GERAÇÃO DE VÍDEO ---")
-
-        # 1. Instanciar o VisualizerSim
-        # Passe o caminho de referência (road) para ele.
         visualizer = VisualizerSim(path_x=path_x, path_y=path_y)
-
-        # 2. Adicionar as trajetórias dos carros
-        # Itere sobre todos os logs coletados e adicione cada trajetória.
-        colors = [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1], [1, 1, 0, 1], [0, 1, 1, 1], [1, 0, 1, 1], [0.5, 0.5, 0.5, 1]] # Cores para diferentes carros
-
-        for i, log in enumerate(all_logs): # Use all_logs para ter todas as simulações no vídeo
+        colors = [[1, 0, 0, 1], [0, 1, 0, 1], [0, 0, 1, 1], [1, 1, 0, 1], [0, 1, 1, 1]]
+        for i, log in enumerate(all_logs):
             vehicle_poses = log.get("vehicle_pose", [])
             if vehicle_poses:
-                # Extrair x, y, theta do log de pose do veículo
-                traj_x = [p[1] for p in vehicle_poses]
-                traj_y = [p[2] for p in vehicle_poses]
-                traj_theta = [p[3] for p in vehicle_poses] # O PyBullet usa radianos, que já é o que você tem
-
-                # Atribuir uma cor baseada no índice ou usar uma padrão
-                car_color = colors[i % len(colors)] # Pega uma cor da lista, ciclando se necessário
-                visualizer.add_car_trajectory(traj_x, traj_y, traj_theta, color=car_color)
-                print(f"Adicionada trajetória para: {labels[i]} (Cor: {car_color[:3]})") # Adiciona um print para feedback
-
-        # 3. Renderizar a simulação e gravar o vídeo
-        # Você pode ajustar sleep_time para controlar a velocidade da animação.
-        # Defina record_video=True para gerar o arquivo MP4.
-        # O follow_car_index (opcional) fará a câmera seguir um carro específico (0 para o primeiro, 1 para o segundo, etc.)
-        video_output_path = "simulacao_comparativa_controladores.mp4"
-        print(f"Renderizando visualização 3D e gravando vídeo para: {video_output_path}")
-        visualizer.render(sleep_time=0.01, record_video=False, video_path=video_output_path, follow_car_index=1) # Exemplo: seguir o segundo carro
-        # ======================================================================
+                visualizer.add_car_trajectory([p[1] for p in vehicle_poses], [p[2] for p in vehicle_poses], [p[3] for p in vehicle_poses], color=colors[i % len(colors)])
+        visualizer.render(sleep_time=0.01, record_video=False, video_path="simulacao_comparativa_controladores.mp4", follow_car_index=1)
     
     # =========================================================================
-    # Opção 4: OTIMIZAÇÃO (TREINO + VALIDAÇÃO)
+    # MODIFICAÇÃO EXCLUSIVA: OTIMIZAÇÃO (NSGA2) COM PERSISTÊNCIA E 5 ELITES
     # =========================================================================
     elif ANALISE_A_FAZER == "OTIMIZACAO_NSGA2":
         print("\n" + "="*60)
         print(" INICIANDO TREINAMENTO OFFLINE DO MPC COM NSGA-II")
         print("="*60)
         
-        # 1. Instancia o algoritmo genético (Ajuste pop_size e generations para testes)
-        # Dica: Use pop_size=10 e generations=5 primeiro só para ver se não dá erro
+        # Instanciação clássica e execução concentrada dentro do GA_opt
         ga = GeneticAlgorithmNSGA2(path_x, path_y, path_theta, pop_size=40, generations=24)
-        
-        # 2. O processamento pesado acontece aqui. O algoritmo vai treinar.
         solucoes_pareto, objetivos_pareto = ga.solve()
         
-        print("\nTreinamento Finalizado! Fronteira de Pareto encontrada.")
+        # Persistência em disco rígido: Salvamento binário das matrizes (.npy)
+        np.save('ga_cached_pop.npy', solucoes_pareto)
+        np.save('ga_cached_objs.npy', objetivos_pareto)
+        print("\n[SUCESSO] População final e custos salvos em disco ('ga_cached_pop.npy' e 'ga_cached_objs.npy')!")
         
-        # 3. Como é multi-objetivo, temos várias opções ótimas. Vamos escolher 
-        #    a solução que tem o menor erro de rastreamento (priorizando precisão).
-        #    objetivos_pareto é uma lista de listas: [Erro, Esforço, -Velocidade]
-        indice_mais_preciso = np.argmin([obj[0] for obj in objetivos_pareto])
-        genes_escolhidos = solucoes_pareto[indice_mais_preciso]
-        
-        q_pos_opt = 10 ** genes_escolhidos[0]
-        q_theta_opt = 10 ** genes_escolhidos[1]
-        q_delta_opt = 10 ** genes_escolhidos[2]
-        q_v_opt = 10 ** genes_escolhidos[3]
-        
-        r_motores_opt = 10 ** genes_escolhidos[4]
-        r_esterco_opt = 10 ** genes_escolhidos[5]
-        
-        v_ref_opt = genes_escolhidos[6]
-        
-        print("\n--- MATRIZES SINTONIZADAS COMPLETAS ---")
-        # Mostramos q_pos_opt duas vezes para x e y
-        print(f"Matriz Q_diag = [{q_pos_opt:.2f}, {q_pos_opt:.2f}, {q_theta_opt:.2f}, {q_delta_opt:.2f}, {q_v_opt:.2f}]")
-        print(f"Matriz R_diag = [{r_motores_opt:.2f}, {r_motores_opt:.2f}, {r_esterco_opt:.2f}]")
-        print(f"Velocidade Ideal: {v_ref_opt:.2f} m/s")
-        print(f"Métricas Previstas -> Erro: {objetivos_pareto[indice_mais_preciso][0]:.4f}, Esforço: {objetivos_pareto[indice_mais_preciso][1]:.2f}")
-        
-        # =====================================================================
-        # VALIDAÇÃO ONLINE COM REDUÇÃO DE PARÂMETROS
-        # =====================================================================
-        print("\nA executar Simulação Real Final com os parâmetros encontrados...")
-        
-        model = AckermannSlipModel(use_mechanical_differential=False, slip_gain=1.0)
-        
-        # Alimentar o MPCController com q_pos duplo e r_motores duplo
-        controller = MPCController(
-            model=model, path_x=path_x, path_y=path_y, path_theta=path_theta,
-            ref_v=v_ref_opt, dt=0.1, horizon=10, control_horizon_m=5,
-            use_differential=True, 
-            q_diag=[q_pos_opt, q_pos_opt, q_theta_opt, q_delta_opt, q_v_opt], 
-            r_diag=[r_motores_opt, r_motores_opt, r_esterco_opt],
-            v_max=3.5, delta_max_deg=30
-        )
-        
-        sim = Simulator(
-            model=model, controller=controller, path_x=path_x, path_y=path_y,
-            end_of_path_threshold=0.3, use_velocity_controller=False,
-            T=40, dt=0.001
-        )
-        sim.run()
-        
-        # 5. Chama o plotador para exibir o resultado da validação
-        print("Gerando gráficos...")
-        plotter = SimulationPlotter(log_data_list=[sim.system_log], labels=["MPC + NSGA-II"])
-        plot_trajectories_custom(plotter, path_x, path_y)
-        plot_vehicle_speeds_custom(plotter, target_linear_speed=v_ref_opt)
-    # =========================================================================
-    # Opção 5: OTIMIZAÇÃO (TREINO + VALIDAÇÃO)
-    # =========================================================================
+        # Delegação estrita: O main solicita a plotagem das barreiras e convergência global
+        print("[PROCESSO] Gerando gráficos de Pareto e Coordenadas Paralelas de Busca...")
+        GeneticAlgorithmNSGA2.plotar_resultados_otimizacao(solucoes_pareto, objetivos_pareto)
 
+    # =========================================================================
+    # MODIFICAÇÃO EXCLUSIVA: VALIDAÇÃO MULTICORES NAS 3 PISTAS INÉDITAS
+    # =========================================================================
     elif ANALISE_A_FAZER == "VALIDACAO_GA":
         print("\n" + "="*80)
-        print(" INICIANDO ANÁLISE DE ROBUSTEZ E DESEMPENHO REAL DA IA")
+        print(" INICIANDO LAÇO DE VALIDAÇÃO CRUZADA MULTICRITÉRIO (SEM RETREINAR)")
         print("="*80)
 
-        # 1. Definição dos parâmetros ótimos obtidos pela IA (Insira aqui o resultado real do seu GA)
-        # Exemplo de vetor sintonizado [q_pos, q_theta, q_delta, q_v, r_motores, r_esterco] + v_ref
-        Q_ia = [0.20, 0.20, 21.70, 2.89, 274.03]
-        R_ia = [2.20, 2.20, 0.07]
-        v_ia = 0.73 # Velocidade ótima encontrada pela IA
+        if not os.path.exists('ga_cached_pop.npy') or not os.path.exists('ga_cached_objs.npy'):
+            print("[ERRO CRÍTICO] Cache não encontrado! Execute a opção 'OTIMIZACAO_NSGA2' pelo menos uma vez.")
+        else:
+            pop_final = np.load('ga_cached_pop.npy')
+            objs_final = np.load('ga_cached_objs.npy')
+            print(f"[CACHE] Carregados {len(pop_final)} indivíduos da fronteira de Pareto ótima em disco.")
 
-        # 2. Gerando os 3 tipos de pistas com características distintas
-        print("Gerando cenários de teste para validação...")
-        
-        pista_A = PathGenerator(start_pos=(0, 0), start_theta=0)
-        pista_A.add_straight(length=2.0)
-        pista_A.add_curve(radius=1.5, angle_deg=90)   # Curva para a esquerda
-        pista_A.add_straight(length=3.0)
-        pista_A.add_curve(radius=1.5, angle_deg=90)   # Topo esquerdo
-        pista_A.add_straight(length=1.5)
-        pista_A.add_curve(radius=1.0, angle_deg=-90)  # Entrada do miolo (direita)
-        pista_A.add_curve(radius=1.0, angle_deg=90)   # Curva em S para esquerda
-        pista_A.add_straight(length=2.0)
-        pista_A.add_curve(radius=1.5, angle_deg=90)   # Curva longa de retorno
-        pista_A.add_straight(length=4.0)
-        ax_ref, ay_ref, ath_ref = pista_A.get_path()
-        
-        pista_B = PathGenerator(start_pos=(0, 0), start_theta=0)
-        pista_B.add_straight(length=3.0)
-        pista_B.add_curve(radius=2.0, angle_deg=-45)  # Desvio inicial para a direita
-        pista_B.add_curve(radius=2.0, angle_deg=90)   # Transição forte para a esquerda
-        pista_B.add_curve(radius=2.0, angle_deg=-45)  # Alinhamento de volta para a reta
-        pista_B.add_straight(length=4.0)
-        bx_ref, by_ref, bth_ref = pista_B.get_path()
-
-        pista_C = PathGenerator(start_pos=(0, 0), start_theta=0)
-        pista_C.add_straight(length=4.0)
-        pista_C.add_curve(radius=0.8, angle_deg=90)   # Primeira quina fechada
-        pista_C.add_straight(length=2.0)
-        pista_C.add_curve(radius=0.8, angle_deg=90)
-        pista_C.add_straight(length=3.0)
-        pista_C.add_curve(radius=1.0, angle_deg=-90)  # Inversão em gancho
-        pista_C.add_straight(length=2.0)
-        pista_C.add_curve(radius=0.8, angle_deg=90)
-        pista_C.add_straight(length=4.0)
-        cx_ref, cy_ref, cth_ref = pista_C.get_path()
-
-        cenarios = [
-            {"nome": "Pista A (Rodovia - Curvas Longas)", "x": ax_ref, "y": ay_ref, "th": ath_ref},
-            {"nome": "Pista B (Urbana - Chicanes e 90°)", "x": bx_ref, "y": by_ref, "th": bth_ref},
-            {"nome": "Pista C (Industrial - Retorno 180°)", "x": cx_ref, "y": cy_ref, "th": cth_ref}
-        ]
-
-        tabela_desempenho = []
-
-        # 3. Execução das Simulações Cruzadas e Geração de Gráficos
-        for cenario in cenarios:
-            print(f"\n>>> Simulando veículo na {cenario['nome']}")
+            # Geração das 3 pistas fechadas inéditas para validação cruzada de robustez
+            pista_A = PathGenerator(start_pos=(0, 0), start_theta=0)
+            pista_A.add_straight(length=2.0); pista_A.add_curve(radius=1.5, angle_deg=90)
+            pista_A.add_straight(length=3.0); pista_A.add_curve(radius=1.5, angle_deg=90)
+            pista_A.add_straight(length=1.5); pista_A.add_curve(radius=1.0, angle_deg=-90)
+            pista_A.add_curve(radius=1.0, angle_deg=90); pista_A.add_straight(length=2.0)
+            pista_A.add_curve(radius=1.5, angle_deg=90); pista_A.add_straight(length=4.0)
+            ax_ref, ay_ref, ath_ref = pista_A.get_path()
             
-            model = AckermannSlipModel(use_mechanical_differential=False, slip_gain=1)
-            controller = MPCController(
-                model=model, path_x=cenario['x'], path_y=cenario['y'], path_theta=cenario['th'],
-                ref_v=v_ia, dt=0.1, horizon=10, control_horizon_m=5, use_differential=True,
-                q_diag=Q_ia, r_diag=R_ia, v_max=3.5, delta_max_deg=30
-            )
-            sim = Simulator(
-                model=model, controller=controller, path_x=cenario['x'], path_y=cenario['y'],
-                end_of_path_threshold=0.3, use_velocity_controller=False, T=50, dt=0.001
-            )
-            sim.run()
-            
-            # Coleta de dados e cálculos de desempenho
-            log_dados = sim.system_log
-            error_data = Simulator.calculate_tracking_errors(log_dados, cenario['x'], cenario['y'], cenario['th'])
-            rms_xy, rms_theta = Simulator.calculate_rms_error(error_data)
-            
-            df_motor = pd.DataFrame(log_dados.get("motor_cmd", []), columns=['time', 'left', 'right'])
-            esforco_total = np.sum(np.abs(np.diff(df_motor['left']))) + np.sum(np.abs(np.diff(df_motor['right']))) if not df_motor.empty else 999.0
+            pista_B = PathGenerator(start_pos=(0, 0), start_theta=0)
+            pista_B.add_straight(length=3.0); pista_B.add_curve(radius=2.0, angle_deg=-45)
+            pista_B.add_curve(radius=2.0, angle_deg=90); pista_B.add_curve(radius=2.0, angle_deg=-45)
+            pista_B.add_straight(length=4.0)
+            bx_ref, by_ref, bth_ref = pista_B.get_path()
 
-            # Índice Combinado (60% Erro Linear, 20% Erro Angular, 20% Esforço Escalado)
-            nota_performance = (0.6 * rms_xy) + (0.2 * np.deg2rad(rms_theta)) + (0.2 * (esforco_total / 1000.0))
+            pista_C = PathGenerator(start_pos=(0, 0), start_theta=0)
+            pista_C.add_straight(length=4.0); pista_C.add_curve(radius=0.8, angle_deg=90)
+            pista_C.add_straight(length=2.0); pista_C.add_curve(radius=0.8, angle_deg=90)
+            pista_C.add_straight(length=3.0); pista_C.add_curve(radius=1.0, angle_deg=-90)
+            pista_C.add_straight(length=2.0); pista_C.add_curve(radius=0.8, angle_deg=90)
+            pista_C.add_straight(length=4.0)
+            cx_ref, cy_ref, cth_ref = pista_C.get_path()
 
-            tabela_desempenho.append({
-                "pista": cenario['nome'], "vel": v_ia, "rms_xy": rms_xy, "rms_th": rms_theta, "esforco": esforco_total, "nota": nota_performance
-            })
+            cenarios_pistas = [
+                {"nome": "Pista A (Sinuosa Fechada)", "x": ax_ref, "y": ay_ref, "th": ath_ref},
+                {"nome": "Pista B (Onda Fechada)", "x": bx_ref, "y": by_ref, "th": bth_ref},
+                {"nome": "Pista C (Labirinto Fechado)", "x": cx_ref, "y": cy_ref, "th": cth_ref}
+            ]
 
-            # Instancia o SimulationPlotter original do seu projeto
-            plotter = SimulationPlotter(log_data_list=[log_dados], labels=[f"MPC Otimizado (IA)"])
-            
-            # --- IMAGEM 1: GRÁFICO DA TRAJETÓRIA REAL (Padrão COMPARACAO_MPC) ---
-            print(f"Exibindo Gráfico de Trajetória - {cenario['nome']}...")
-            plot_trajectories_custom(plotter, cenario['x'], cenario['y'], title_suffix=f"- {cenario['nome']}", heading_step=100)
+            # Injeção e casamento do controlador MPC com a nova rotina multicor
+            # Extraímos os 5 melhores por f1 para simulação de validação
+            idx_precisao = np.argsort(objs_final[:, 0])[:5]
+            cores_5 = ['#d62728', '#ff7f0e', '#2ca02c', '#1f77b4', '#9467bd']
 
-            # --- IMAGEM 2: GRÁFICO DO ESFORÇO DE CONTROLE (Comandos do Motor) ---
-            print(f"Exibindo Gráfico de Esforço de Controle - {cenario['nome']}...")
-            import matplotlib.pyplot as plt
-            if not df_motor.empty:
-                plt.figure(figsize=(12, 6))
-                plt.plot(df_motor['time'], df_motor['left'], 'b-', label='Motor Esquerdo (Cmd)', alpha=0.8)
-                plt.plot(df_motor['time'], df_motor['right'], 'g--', label='Motor Direito (Cmd)', alpha=0.8)
+            for cenario in cenarios_pistas:
+                plt.figure(figsize=(8, 6))
+                plt.plot(cenario['x'], cenario['y'], 'k--', linewidth=1.5, label='Trajetória de Referência')
                 
-                plt.title(f'Sinal de Comando dos Motores (Esforço de Controle) - {cenario['nome']}', fontsize=12, fontweight='bold')
-                plt.xlabel('Tempo (s)', fontsize=10)
-                plt.ylabel('Ação de Controle / Tensão Comando', fontsize=10)
-                plt.grid(True, linestyle='--', alpha=0.6)
-                plt.legend(loc='upper right')
-                plt.tight_layout()
-                plt.show() # O código avança para o próximo cenário após você fechar esta janela
-            else:
-                print("Aviso: Histórico de comandos de motor vazio para esta simulação.")
-
-        # --- IMPRESSÃO FORMATADA DA TABELA FINAL DE RESULTADOS ---
-        print("\n" + "="*105)
-        print(" " * 25 + "RELATÓRIO DE DESEMPENHO REAL DO CONTROLADOR OTIMIZADO (IA)")
-        print("="*105)
-        header = f"{'Cenário de Pista Testado':<38} | {'Vel (m/s)':<10} | {'RMS Pos (m)':<12} | {'RMS Ang (°)':<12} | {'Esforço Atu':<12} | {'IND. PERF (Nota)'}"
-        print(header)
-        print("-"*105)
-        for r in tabela_desempenho:
-            row = f"{r['pista']:<38} | {r['vel']:<10.2f} | {r['rms_xy']:<12.4f} | {r['rms_th']:<12.4f} | {r['esforco']:<12.1f} | {r['nota']:.4f}"
-            print(row)
-        print("-"*105)
-        print("= NOTA METODOLÓGICA: No índice combinado, valores menores comprovam melhor eficiência global.")
-        print("="*105)
-    else:
-        print(f"ERRO: Análise '{ANALISE_A_FAZER}' desconhecida. Verifique a variável no início do script.")
-
-    print("\nProcesso finalizado.")
+                for idx_cor, idx in enumerate(idx_precisao):
+                    cromossomo = pop_final[idx]
+                    q_pos, q_theta, q_delta, q_v, r_motor, r_est, v_ref = GeneticAlgorithmNSGA2.decodificar_genes(cromossomo)
+                    
+                    model = AckermannSlipModel(use_mechanical_differential=False, slip_gain=1)
+                    controller = MPCController(
+                        model=model, path_x=cenario['x'], path_y=cenario['y'], path_theta=cenario['th'],
+                        ref_v=v_ref, dt=0.1, horizon=10, control_horizon_m=5, use_differential=True,
+                        q_diag=[q_pos, q_pos, q_theta, q_delta, q_v], r_diag=[r_motor, r_motor, r_est],
+                        v_max=3.5, delta_max_deg=30
+                    )
+                    sim = Simulator(
+                        model=model, controller=controller, path_x=cenario['x'], path_y=cenario['y'],
+                        end_of_path_threshold=0.3, use_velocity_controller=False, T=50, dt=0.001
+                    )
+                    sim.run()
+                    log_dados = sim.system_log
+                    plt.plot(log_dados['vehicle_pose'][:, 1], log_dados['vehicle_pose'][:, 2], color=cores_5[idx_cor], linewidth=2, label=f'Melhor {idx_cor+1}')
+                    
+                plt.xlabel('X (m)'); plt.ylabel('Y (m)')
+                plt.title(f"Validação Cruzada Estendida: {cenario['nome']}")
+                plt.grid(True, linestyle=':', alpha=0.5); plt.axis('equal'); plt.legend(loc='best')
+                plt.show()

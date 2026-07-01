@@ -1,6 +1,8 @@
 import random
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+from pandas.plotting import parallel_coordinates
 from ackermann_model import AckermannSlipModel
 from mpc_controller import MPCController
 from simulator import Simulator
@@ -14,214 +16,184 @@ class GeneticAlgorithmNSGA2:
         self.generations = generations
         
         # Limites dos genes: [q_pos(exp), q_ori(exp), r_motor(exp), r_esterco(exp), v_ref]
-        # Usamos expoentes (10^x) para as matrizes Q e R varrerem ordens de grandeza
         self.bounds = [
-            (-2, 2.5), # [0] q_pos
-            (-2, 2.5), # [1] q_theta 
-            (-2, 2.5), # [2] q_delta
-            (-2, 2.5), # [3] q_v
-            (-1, 1), # [4] r_motores (R geralmente pode ser maior, deixamos até ~3000)
-            (-1, 1), # [5] r_esterco
-            (0.5, 3.5) # [6] v_ref (velocidade máxima)
+            (-2, 2.5),  # [0] q_pos
+            (-2, 2.5),  # [1] q_theta 
+            (-2, 2.5),  # [2] q_delta
+            (-2, 2.5),  # [3] q_v
+            (-1, 1),    # [4] r_motores
+            (-1, 1),    # [5] r_esterco
+            (0.5, 3.5)  # [6] v_ref (linear)
         ]
         self.taxa_cruzamento = 0.8
         self.taxa_mutacao = 0.2
 
-    # =========================================================================
-    # 1. FUNÇÃO DE SIMULAÇÃO E AVALIAÇÃO (7 PARÂMETROS - NORMALIZADA)
-    # =========================================================================
-    def _simular_e_avaliar(self, individuo):
-        """Roda a simulação curta e retorna os 3 objetivos normalizados para o NSGA-II."""
-        # Decodifica os 7 parâmetros contínuos (usando base 10 para escalas logarítmicas)
-        q_pos = 10 ** individuo[0]
-        q_theta = 10 ** individuo[1]
-        q_delta = 10 ** individuo[2]
-        q_v = 10 ** individuo[3]
+    def _inicializar_populacao(self):
+        pop = []
+        for _ in range(self.pop_size):
+            ind = [random.uniform(b[0], b[1]) for b in self.bounds]
+            pop.append(ind)
+        return pop
+
+    @staticmethod
+    def decodificar_genes(gene):
+        """Converte os expoentes logarítmicos e lineares em ganhos físicos do MPC"""
+        q_pos = 10**gene[0]
+        q_theta = 10**gene[1]
+        q_delta = 10**gene[2]
+        q_v = 10**gene[3]
+        r_motor = 10**gene[4]
+        r_est = 10**gene[5]
+        v_ref = gene[6]
+        return q_pos, q_theta, q_delta, q_v, r_motor, r_est, v_ref
+
+    def _simular_e_avaliar(self, ind):
+        """Executa a simulação física transiente em malha fechada para o indivíduo"""
+        q_pos, q_theta, q_delta, q_v, r_motor, r_est, v_ref = self.decodificar_genes(ind)
         
-        # Aplica o MESMO peso q_pos para x e y (Garante simetria nos eixos cartesianos)
-        q_diag = [q_pos, q_pos, q_theta, q_delta, q_v]
-        
-        r_motores = 10 ** individuo[4]
-        r_esterco = 10 ** individuo[5]
-        
-        # Aplica o MESMO peso r_motores para a roda esquerda e direita (Controle Simétrico)
-        r_diag = [r_motores, r_motores, r_esterco]
-        
-        v_ref = individuo[6]
-        
-        # Instancia o modelo cinemático e o controlador preditivo (MPC)
         model = AckermannSlipModel(use_mechanical_differential=False, slip_gain=1.0)
-        
         controller = MPCController(
             model=model, path_x=self.path_x, path_y=self.path_y, path_theta=self.path_theta,
-            ref_v=v_ref, dt=0.1, horizon=10, control_horizon_m=5,
-            use_differential=True, q_diag=q_diag, r_diag=r_diag,
+            ref_v=v_ref, dt=0.1, horizon=10, control_horizon_m=5, use_differential=True,
+            q_diag=[q_pos, q_pos, q_theta, q_delta, q_v],
+            r_diag=[r_motor, r_motor, r_est],
             v_max=3.5, delta_max_deg=30
         )
-        
-        # Configuração do simulador com Passo e Tempo real do projeto
         sim = Simulator(
-            model=model, controller=controller,
-            path_x=self.path_x, path_y=self.path_y,
-            end_of_path_threshold=0.3, use_velocity_controller=False,
-            T=40.0, dt=0.001
+            model=model, controller=controller, path_x=self.path_x, path_y=self.path_y,
+            end_of_path_threshold=0.3, use_velocity_controller=False, T=40, dt=0.001
         )
         sim.run()
-        
-        # --- Extração das Métricas Logadas ---
         log = sim.system_log
+        
         error_data = Simulator.calculate_tracking_errors(log, self.path_x, self.path_y, self.path_theta)
-        rms_xy, rms_theta = Simulator.calculate_rms_error(error_data)
+        rms_xy, rms_theta = self.simulator.calculate_rms_error(error_data) if hasattr(self, 'simulator') else Simulator.calculate_rms_error(error_data)
         
-        # Cálculo do Índice de Esforço de Controle (Variação dos Atuadores)
+        f1_erro = rms_xy + np.deg2rad(rms_theta)
+        
         df_motor = pd.DataFrame(log.get("motor_cmd", []), columns=['time', 'left', 'right'])
-        if not df_motor.empty:
-            esforco = np.sum(np.abs(np.diff(df_motor['left']))) + np.sum(np.abs(np.diff(df_motor['right'])))
+        f2_esforco = np.sum(np.abs(np.diff(df_motor['left']))) + np.sum(np.abs(np.diff(df_motor['right']))) if not df_motor.empty else 999.0
+        
+        # NSGA-II minimiza estritamente: invertemos a velocidade máxima linearmente
+        f3_agilidade = 3.5 - v_ref
+        
+        # Aplicação de Death Penalty caso o carro saia da pista ou capote por instabilidade
+        poses = log.get('vehicle_pose', [])
+        
+        # Tratamento robusto para extrair o erro lateral independente do tipo de objeto retornado
+        if isinstance(error_data, dict):
+            tracking_ref = error_data.get('cross_track_error', [])
+            max_lateral_error = np.max(np.abs(tracking_ref)) if len(tracking_ref) > 0 else 0.0
+        elif isinstance(error_data, pd.DataFrame):
+            max_lateral_error = error_data['cross_track_error'].abs().max() if 'cross_track_error' in error_data.columns else 0.0
         else:
-            esforco = 999.0
-            
-        # --- Critério de Falha Dinâmica (Death Penalty) ---
-        # 1. Se o desvio lateral for intolerável (> 1.2 metros)
-        # 2. Se a simulação esgotar o tempo total (40s) e o carro ainda estiver longe da meta
-        dist_final = np.hypot(sim.x - self.path_x[-1], sim.y - self.path_y[-1])
-        falhou = (rms_xy > 1.2) or (dist_final > 1.0 and sim.time >= 39.9)
-        
-        if falhou:
-            return [999.0, 999.0, 999.0] # Punição severa para eliminar o indivíduo do ranking
-            
-        # =====================================================================
-        # AJUSTE MATEMÁTICO: NORMALIZAÇÃO COERENTE PARA O NSGA-II
-        # =====================================================================
-        # O NSGA-II minimiza estritamente todas as posições do vetor retornado.
-        
-        # Objetivo 1 (Precisão): Minimiza o erro geométrico e angular combinado
-        obj1_erro = rms_xy + np.deg2rad(rms_theta)
-        
-        # Objetivo 2 (Suavidade): Esforço escalonado (fator /100) para equilibrar ordens de grandeza
-        obj2_esforco = esforco / 100.0
-        
-        # Objetivo 3 (Performance/Rapidez): Transforma a MAXIMIZAÇÃO da velocidade em MINIMIZAÇÃO.
-        # Quanto maior for a v_ref (perto do limite de 3.5), menor e melhor será o custo enviado à IA.
-        obj3_velocidade = 3.5 - v_ref
-        
-        return [obj1_erro, obj2_esforco, obj3_velocidade]
-    # =========================================================================
-    # 2. CORE DO NSGA-II: ORDENAÇÃO E DISTÂNCIA
-    # =========================================================================
-    def _fast_non_dominated_sort(self, objetivos):
-        pop_size = len(objetivos)
-        S = [[] for _ in range(pop_size)]
-        n = [0] * pop_size
-        ranks = [[] for _ in range(pop_size + 1)]
-        rank_do_ind = [0] * pop_size
+            # Se for uma lista pura ou array de erros, assume o cálculo direto sobre ela
+            try:
+                max_lateral_error = np.max(np.abs(error_data)) if len(error_data) > 0 else 0.0
+            except:
+                max_lateral_error = 0.0
 
-        for p in range(pop_size):
-            for q in range(pop_size):
-                # p domina q se for menor/igual em todos e estritamente menor em pelo menos um
-                domina = all(objetivos[p][i] <= objetivos[q][i] for i in range(3)) and \
-                         any(objetivos[p][i] < objetivos[q][i] for i in range(3))
-                dominado = all(objetivos[q][i] <= objetivos[p][i] for i in range(3)) and \
-                           any(objetivos[q][i] < objetivos[p][i] for i in range(3))
-                if domina:
+        # Aplicação da penalidade absoluta se o veículo estourar o limite de 1.2 metros da pista
+        if len(poses) < 5 or max_lateral_error > 1.2:
+            return [999.0, 999.0, 999.0]
+
+    def _fast_non_dominated_sort(self, objs):
+        num_ind = len(objs)
+        S = [[] for _ in range(num_ind)]
+        n = [0] * num_ind
+        rank = [0] * num_ind
+        fronts = [[]]
+
+        for p in range(num_ind):
+            for q in range(num_ind):
+                p_dominates = False
+                q_dominates = False
+                
+                # Checa dominância multi-objetivo estrita
+                if (objs[p][0] <= objs[q][0] and objs[p][1] <= objs[q][1] and objs[p][2] <= objs[q][2]) and \
+                   (objs[p][0] < objs[q][0] or objs[p][1] < objs[q][1] or objs[p][2] < objs[q][2]):
+                    p_dominates = True
+                elif (objs[q][0] <= objs[p][0] and objs[q][1] <= objs[p][1] and objs[q][2] <= objs[p][2]) and \
+                     (objs[q][0] < objs[p][0] or objs[q][1] < objs[p][1] or objs[q][2] < objs[p][2]):
+                    q_dominates = True
+
+                if p_dominates:
                     S[p].append(q)
-                elif dominado:
+                elif q_dominates:
                     n[p] += 1
-                    
             if n[p] == 0:
-                rank_do_ind[p] = 1
-                ranks[1].append(p)
+                rank[p] = 0
+                fronts[0].append(p)
 
-        i = 1
-        while len(ranks[i]) > 0:
-            proximo_front = []
-            for p in ranks[i]:
+        i = 0
+        while fronts[i]:
+            next_front = []
+            for p in fronts[i]:
                 for q in S[p]:
                     n[q] -= 1
                     if n[q] == 0:
-                        rank_do_ind[q] = i + 1
-                        proximo_front.append(q)
+                        rank[q] = i + 1
+                        next_front.append(q)
             i += 1
-            ranks[i] = proximo_front
+            fronts.append(next_front)
+        return fronts[:-1], rank
 
-        return [f for f in ranks if len(f) > 0], rank_do_ind
-
-    def _calcular_crowding_distance(self, objetivos, front):
-        tamanho = len(front)
-        if tamanho == 0: return {}
-        distancias = {ind: 0.0 for ind in front}
-        
-        for m in range(3): # 3 objetivos
-            front_ordenado = sorted(front, key=lambda x: objetivos[x][m])
-            distancias[front_ordenado[0]] = float('inf')
-            distancias[front_ordenado[-1]] = float('inf')
-            
-            min_obj = objetivos[front_ordenado[0]][m]
-            max_obj = objetivos[front_ordenado[-1]][m]
-            extensoes = max_obj - min_obj if (max_obj - min_obj) > 0 else 1e-6
-                
-            for i in range(1, tamanho - 1):
-                distancias[front_ordenado[i]] += (objetivos[front_ordenado[i+1]][m] - objetivos[front_ordenado[i-1]][m]) / extensoes
-        return distancias
-
-    # =========================================================================
-    # 3. OPERADORES GENÉTICOS
-    # =========================================================================
-    def _selecao_torneio_nsga2(self, populacao, ranks, distancias, k=2):
-        candidatos = random.sample(range(len(populacao)), k)
-        melhor = candidatos[0]
-        for c in candidatos[1:]:
-            if ranks[c] < ranks[melhor]: # Prefere Rank menor (melhor)
-                melhor = c
-            elif ranks[c] == ranks[melhor]:
-                if distancias[c] > distancias[melhor]: # Desempata pelo mais isolado
-                    melhor = c
-        return populacao[melhor]
+    def _calcular_crowding_distance(self, objs, front):
+        dist = {idx: 0.0 for idx in front}
+        for m in range(3):  # 3 Objetivos de aptidão
+            front_ordenado = sorted(front, key=lambda x: objs[x][m])
+            min_obj = objs[front_ordenado[0]][m]
+            max_obj = objs[front_ordenado[-1]][m]
+            if max_obj == min_obj: continue
+            dist[front_ordenado[0]] = float('inf')
+            dist[front_ordenado[-1]] = float('inf')
+            for i in range(1, len(front_ordenado) - 1):
+                dist[front_ordenado[i]] += (objs[front_ordenado[i+1]][m] - objs[front_ordenado[i-1]][m]) / (max_obj - min_obj)
+        return dist
 
     def _cruzamento_blx(self, p1, p2, alpha=0.5):
         c1, c2 = [], []
-        for g1, g2, b in zip(p1, p2, self.bounds):
-            d = abs(g1 - g2)
-            min_v, max_v = max(min(g1, g2) - alpha*d, b[0]), min(max(g1, g2) + alpha*d, b[1])
-            c1.append(random.uniform(min_v, max_v))
-            c2.append(random.uniform(min_v, max_v))
+        for i in range(len(self.bounds)):
+            c_min = min(p1[i], p2[i])
+            c_max = max(p1[i], p2[i])
+            I = c_max - c_min
+            val1 = random.uniform(c_min - alpha*I, c_max + alpha*I)
+            val2 = random.uniform(c_min - alpha*I, c_max + alpha*I)
+            c1.append(np.clip(val1, self.bounds[i][0], self.bounds[i][1]))
+            c2.append(np.clip(val2, self.bounds[i][0], self.bounds[i][1]))
         return c1, c2
 
     def _mutacao(self, ind):
-        for i in range(len(ind)):
+        for i in range(len(self.bounds)):
             if random.random() < self.taxa_mutacao:
-                ind[i] = np.clip(ind[i] + random.gauss(0, 0.5), self.bounds[i][0], self.bounds[i][1])
+                escala = (self.bounds[i][1] - self.bounds[i][0]) * 0.1
+                ind[i] = np.clip(ind[i] + random.gauss(0, escala), self.bounds[i][0], self.bounds[i][1])
         return ind
 
-    # =========================================================================
-    # 4. LOOP PRINCIPAL DO ALGORITMO
-    # =========================================================================
     def solve(self):
-        print("-> Inicializando NSGA-II: Gerando população aleatória...")
-        pop_pai = [[random.uniform(b[0], b[1]) for b in self.bounds] for _ in range(self.pop_size)]
+        """Orquestra as gerações evolucionárias do Rank de Pareto"""
+        pop_pai = self._inicializar_populacao()
         
         for geracao in range(self.generations):
-            # 1. Avalia Pais
             objs_pai = [self._simular_e_avaliar(ind) for ind in pop_pai]
-            ranks_pai, rank_vetor_pai = self._fast_non_dominated_sort(objs_pai)
+            fronts_pai, rank_vetor_pai = self._fast_non_dominated_sort(objs_pai)
             
-            dist_pai = {}
-            for front in ranks_pai:
-                dist_pai.update(self._calcular_crowding_distance(objs_pai, front))
-                
-            # 2. Gera Filhos
             pop_filho = []
             while len(pop_filho) < self.pop_size:
-                p1 = self._selecao_torneio_nsga2(pop_pai, rank_vetor_pai, dist_pai)
-                p2 = self._selecao_torneio_nsga2(pop_pai, rank_vetor_pai, dist_pai)
-                c1, c2 = self._cruzamento_blx(p1, p2) if random.random() < self.taxa_cruzamento else (p1.copy(), p2.copy())
-                pop_filho.extend([self._mutacao(c1), self._mutacao(c2)])
+                # Sorteio via Torneio Binário Estrito
+                idx1, idx2 = random.sample(range(self.pop_size), 2)
+                p1 = pop_pai[idx1] if rank_vetor_pai[idx1] < rank_vetor_pai[idx2] else pop_pai[idx2]
+                idx3, idx4 = random.sample(range(self.pop_size), 2)
+                p2 = pop_pai[idx3] if rank_vetor_pai[idx3] < rank_vetor_pai[idx4] else pop_pai[idx4]
                 
-            # 3. Une Pais e Filhos (2N)
+                c1, c2 = self._cruzamento_blx(p1, p2)
+                pop_filho.extend([self._mutacao(c1), self._mutacao(c2)])
+            
+            # Estratégia Elitista: Fusão 2N e Descarte das 40 piores soluções
             pop_mista = pop_pai + pop_filho[:self.pop_size]
             objs_mista = [self._simular_e_avaliar(ind) for ind in pop_mista]
-            
-            # 4. Re-ordena e Seleciona os melhores para a próxima geração
             fronts_mista, rank_vetor_mista = self._fast_non_dominated_sort(objs_mista)
+            
             nova_pop = []
             i = 0
             while len(nova_pop) + len(fronts_mista[i]) <= self.pop_size:
@@ -235,14 +207,65 @@ class GeneticAlgorithmNSGA2:
                 nova_pop.extend([pop_mista[idx] for idx in ind_ordenados[:self.pop_size - len(nova_pop)]])
                 
             pop_pai = nova_pop
-            print(f"Geração {geracao+1:02d} concluída | Soluções de Rank 1 (Pareto): {len(ranks_pai[0])}")
+            print(f"Geração {geracao+1:02d}/{self.generations} concluída | Rank 1 Elite: {len(fronts_mista[0])}")
             
-        # Retorna os indivíduos que compõem a melhor Fronteira de Pareto
         objs_finais = [self._simular_e_avaliar(ind) for ind in pop_pai]
-        ranks_finais, _ = self._fast_non_dominated_sort(objs_finais)
-        fronteira_pareto_indices = ranks_finais[0]
+        return pop_pai, objs_finais
+
+    @staticmethod
+    def plotar_resultados_otimizacao(solucoes, objetivos):
+        """Gera e salva todos os artefatos de dados e convergência tridimensionais"""
+        solucoes = np.array(solucoes)
+        objetivos = np.array(objetivos)
+        v_reais = solucoes[:, 6]
         
-        melhores_solucoes = [pop_pai[idx] for idx in fronteira_pareto_indices]
-        melhores_objetivos = [objs_finais[idx] for idx in fronteira_pareto_indices]
+        # Filtra os 5 melhores indivíduos por ordem crescente de erro (f1)
+        indices_5_melhores = np.argsort(objetivos[:, 0])[:5]
+        cores_5 = ['#d62728', '#ff7f0e', '#2ca02c', '#1f77b4', '#9467bd']
         
-        return melhores_solucoes, melhores_objetivos
+        # Gráfico 1: Barreira de Pareto (Erro x Velocidade)
+        plt.figure(figsize=(7, 5))
+        plt.scatter(objetivos[:, 0], v_reais, color='gray', alpha=0.4, label='Outras Soluções Rank 1')
+        for idx_cor, idx in enumerate(indices_5_melhores):
+            plt.scatter(objetivos[idx, 0], v_reais[idx], color=cores_5[idx_cor], edgecolor='black', s=150, zorder=5, label=f'Melhor {idx_cor+1}')
+        plt.xlabel('Precisão de Rastreamento (Erro f1)')
+        plt.ylabel('Velocidade de Referência (v_ref)')
+        plt.title('Barreira de Pareto: Erro de Rastreamento vs Velocidade')
+        plt.grid(True, linestyle=':', alpha=0.5)
+        plt.legend()
+        plt.savefig('pareto_erro_velocidade.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+        # Gráfico 2: Barreira de Pareto (Erro x Esforço de Controle)
+        plt.figure(figsize=(7, 5))
+        plt.scatter(objetivos[:, 0], objetivos[:, 1], color='gray', alpha=0.4, label='Outras Soluções Rank 1')
+        for idx_cor, idx in enumerate(indices_5_melhores):
+            plt.scatter(objetivos[idx, 0], objetivos[idx, 1], color=cores_5[idx_cor], edgecolor='black', s=150, zorder=5, label=f'Melhor {idx_cor+1}')
+        plt.xlabel('Precisão de Rastreamento (Erro f1)')
+        plt.ylabel('Esforço de Controle (f2)')
+        plt.title('Barreira de Pareto: Erro de Rastreamento vs Esforço de Controle')
+        plt.grid(True, linestyle=':', alpha=0.5)
+        plt.legend()
+        plt.savefig('pareto_erro_esforco.png', dpi=300, bbox_inches='tight')
+        plt.close()
+
+        # Gráfico 3: Coordenadas Paralelas (Convergência Global do Espaço de Busca)
+        plt.figure(figsize=(11, 5))
+        df_busca = pd.DataFrame(solucoes, columns=['q_pos', 'q_theta', 'q_delta', 'q_v', 'r_motor', 'r_est', 'v_ref'])
+        df_busca['Elite'] = 'Outros Indivíduos'
+        for idx_cor, idx in enumerate(indices_5_melhores):
+            df_busca.loc[idx, 'Elite'] = f'Melhor {idx_cor+1}'
+        df_busca = df_busca.sort_values(by='Elite', ascending=False)
+        
+        paleta = {f'Melhor {i+1}': cores_5[i] for i in range(5)}
+        paleta['Outros Indivíduos'] = '#e0e0e0'
+        
+        parallel_coordinates(df_busca, 'Elite', color=[paleta[c] for c in df_busca['Elite'].unique()], alpha=0.8, linewidth=2)
+        plt.title('Convergência do Espaço de Busca (Verificação de Ótimo Global)')
+        plt.ylabel('Valor Numérico do Gene')
+        plt.grid(True, linestyle=':', alpha=0.4)
+        plt.xticks(rotation=15)
+        plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+        plt.savefig('convergencia_espaco_busca.png', dpi=300, bbox_inches='tight')
+        plt.close()
+        print("\n[SUCESSO] Os 3 gráficos analíticos de Pareto e Convergência Global foram exportados!")
